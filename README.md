@@ -21,8 +21,7 @@ By offloading input generation to an external microcontroller, the automation be
 
 The system uses a **Wireless Split-Processing Architecture** to ensure isolation.
 
-```mermaid
-graph LR
+flowchart LR
     subgraph Host PC [Windows Host]
         A[Target Application] -->|Memory Read| B(C# Controller)
         B -->|Calculate Vectors| C{TCP Client}
