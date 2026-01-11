@@ -1,5 +1,6 @@
-﻿using System;
-using System.IO.Ports;
+using System;
+using System.Net.Sockets; // Ez kell a Wi-Fi kommunikációhoz
+using System.Text;
 using System.Runtime.InteropServices;
 using System.Threading;
 using swed64;
@@ -11,26 +12,34 @@ class AutomationHost
     private static volatile bool isAutomationEnabled = false;
     private static readonly Random randomGenerator = new Random();
 
+    // Billentyűfigyelés (pl. egér oldalsó gomb vagy ALT billentyű)
     [DllImport("user32.dll")]
     static extern short GetAsyncKeyState(int vKey);
 
     static void Main()
     {
-        Console.Title = "Hardware-Isolated Input Automation System";
+        Console.Title = "Hardware-Isolated Input Automation System (Wi-Fi Edition)";
         Console.WriteLine("Initializing Hardware Bridge...");
         
-        // Emulate system initialization time
+        // Rendszer inicializálás szimuláció
         Thread.Sleep(2000); 
 
+        // ---------------------------------------------------------
+        // ⚙️ KONFIGURÁCIÓ
+        // ---------------------------------------------------------
         string targetProcess = "cs2";
         string targetModule = "client.dll";
+        
+        // PICO BEÁLLÍTÁSOK (Ezt írd át a Pico IP címére!)
+        string picoIp = "192.168.1.100"; // <--- ITT ÍRD ÁT!
+        int picoPort = 65432;            // Ennek egyeznie kell a main.py-ban lévővel
 
+        // Memóriaolvasó inicializálása
         swed64.swed memoryInterface = new swed64.swed();
         memoryInterface.GetProcess(targetProcess);
-
         IntPtr moduleBase = memoryInterface.GetModuleBase(targetModule);
 
-        // Memory Configuration Map
+        // Memória Offsetek (CS2 aktuális offsetjei)
         int primaryContextOffset = 0x18560D0;
         int objectDirectoryOffset = 0x1A020A8;
         int objectIdIndexOffset = 0x1458;
@@ -40,26 +49,20 @@ class AutomationHost
         int objectHandleOffset = 0x824;
         int labelOffset = 0x660;
 
-        int ACTIVATION_KEY = 0x05; // Input Trigger Key
+        int ACTIVATION_KEY = 0x05; // 0x05 = Egér oldalsó gomb (XBUTTON1)
 
-        SerialPort dataPort = new SerialPort("COM6", 115200)
-        {
-            ReadTimeout = 1000,
-            WriteTimeout = 1000,
-            RtsEnable = true,
-            DtrEnable = true
-        };
-
+        // Vizualizációs változók
         IntPtr directoryAddress = IntPtr.Zero;
         IntPtr directoryEntry = IntPtr.Zero;
         DateTime lastDirectoryUpdate = DateTime.MinValue;
-
         StateMonitor monitor = new StateMonitor();
 
+        // Gombfigyelő szál indítása
         Thread inputThread = new Thread(() => MonitorInput(ACTIVATION_KEY));
         inputThread.IsBackground = true;
         inputThread.Start();
 
+        // Vizualizációs szál (hogy lássuk, mit lát a program)
         Thread vizThread = new Thread(() =>
         {
             while (true)
@@ -82,15 +85,26 @@ class AutomationHost
         vizThread.IsBackground = true;
         vizThread.Start();
 
+        // ---------------------------------------------------------
+        // 📶 HÁLÓZATI KAPCSOLÓDÁS (TCP CLIENT)
+        // ---------------------------------------------------------
+        TcpClient client = new TcpClient();
         try
         {
-            dataPort.Open();
-            Console.WriteLine("✅ Hardware Interface Online.");
+            Console.WriteLine($"Kapcsolódás a Pico-hoz ({picoIp}:{picoPort})...");
+            
+            // Kapcsolódási kísérlet a Pico Wi-Fi szerveréhez
+            client.Connect(picoIp, picoPort); 
+            NetworkStream stream = client.GetStream();
+            
+            Console.WriteLine("✅ SIKER! Wi-Fi Hardware Interface Online.");
+            Console.WriteLine("A rendszer készen áll. Tartsd lenyomva az aktiváló gombot.");
 
             while (true)
             {
                 if (isAutomationEnabled)
                 {
+                    // Memóriaolvasás logika
                     IntPtr localContext = memoryInterface.ReadPointer(moduleBase, primaryContextOffset);
                     directoryAddress = memoryInterface.ReadPointer(moduleBase, objectDirectoryOffset);
 
@@ -101,35 +115,42 @@ class AutomationHost
                     IntPtr targetObject = memoryInterface.ReadPointer(targetEntry, 0x78 * (targetIndex & 0x1FF));
 
                     int targetIntegrity = memoryInterface.ReadInt(targetObject, integrityValueOffset);
-                    int targetGroup = memoryInterface.ReadInt(targetObject, groupIdentifierOffset);
                     
-                    // Check for inactive state
+                    // Inaktív állapot ellenőrzése
                     bool isInactive = (ReadByte(memoryInterface, targetObject, stateFlagOffset) != 0);
 
-                    // Logic: If integrity checks pass and object is active
+                    // LOGIKA: Ha az ellenfél él és célozható
                     if (targetIntegrity > 0 && !isInactive)
                     {
-                        // Send actuation signal to external hardware
-                        dataPort.WriteLine("F");
+                        // Parancs küldése Wi-Fi-n keresztül
+                        // A main.py a "CLICK" parancsot várja, lezárva egy új sorral (\n)
+                        string command = "CLICK\n";
+                        byte[] data = Encoding.ASCII.GetBytes(command);
                         
-                        // Hardware latency simulation
+                        // Küldés a socketre
+                        stream.Write(data, 0, data.Length);
+                        
+                        // Hardveres késleltetés szimuláció (humanizálás)
                         Thread.Sleep(randomGenerator.Next(45, 98));
                     }
                 }
-                Thread.Sleep(1); // Cycle hygiene
+                Thread.Sleep(1); // CPU kímélés
             }
+        }
+        catch (SocketException sockEx)
+        {
+            Console.WriteLine($"\n[HÁLÓZATI HIBA] Nem sikerült csatlakozni a Pico-hoz!");
+            Console.WriteLine($"Ellenőrizd: 1. A Pico IP címe jó-e ({picoIp})? 2. A Pico csatlakozott-e a Wi-Fi-re?");
+            Console.WriteLine($"Részletek: {sockEx.Message}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"System Error: {ex.Message}");
+            Console.WriteLine($"Rendszerhiba: {ex.Message}");
         }
         finally
         {
-            if (dataPort.IsOpen)
-            {
-                dataPort.Close();
-                Console.WriteLine("Hardware Interface Disconnected.");
-            }
+            client.Close();
+            Console.WriteLine("Interface Disconnected.");
         }
     }
 
@@ -143,6 +164,7 @@ class AutomationHost
     {
         while (true)
         {
+            // Gombállapot figyelése
             isAutomationEnabled = (GetAsyncKeyState(key) & 0x8000) != 0;
             Thread.Sleep(1);
         }
